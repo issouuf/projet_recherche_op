@@ -81,6 +81,55 @@ def formater_temps(total_mins):
     heures = int(total_mins // 60)
     mins = int(total_mins % 60)
     return f"{heures}h{mins:02d}"
+
+
+
+def genere_instance_pure_aleatoire(n, num_precedences=2):
+    # 1. Génération des coordonnées (0 à 100)
+    coords = [(random.randint(0, 100), random.randint(0, 100)) for _ in range(n+1)]
+    
+    # 2. Calcul de la matrice des distances (Euclidienne)
+    mat_temps = np.zeros((n+1, n+1), dtype=np.float64)
+    for i in range(n+1):
+        for j in range(n+1):
+            if i != j:
+                mat_temps[i][j] = math.hypot(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
+                
+    # On applique Floyd-Warshall pour garantir des routes logiques !
+    for k in range(n+1):
+        for i in range(n+1):
+            for j in range(n+1):
+                if mat_temps[i][k] + mat_temps[k][j] < mat_temps[i][j]:
+                    mat_temps[i][j] = mat_temps[i][k] + mat_temps[k][j]
+    
+    mat_temps = mat_temps.astype(np.int64)
+
+    # 3. Temps de service
+    s = np.random.randint(5, 15, size=n+1)
+    s[0] = 0
+
+    # 4. Fenêtres de temps 100% Aléatoires (Réparties sur 3 jours logiques)
+    e = np.zeros(n+1)
+    l = np.full(n+1, 999999.0)
+    for i in range(1, n+1):
+        jour = random.randint(0, 2) # L'ouverture peut tomber le Jour 0, 1 ou 2
+        heure_ouverture = random.randint(300, 1000) # Entre 5h et 16h40
+        
+        e[i] = jour * 1440 + heure_ouverture
+        l[i] = e[i] + random.randint(60, 300) # La fenêtre reste ouverte entre 1h et 5h
+
+    # 5. Précédences Aléatoires (comme ton code)
+    P = []
+    villes_dispo = list(range(1, n + 1))
+    random.shuffle(villes_dispo)
+    for _ in range(min(num_precedences, len(villes_dispo)//2)):
+        i = villes_dispo.pop()
+        j = villes_dispo.pop()
+        P.append((i, j))
+
+    return mat_temps, e, l, s, P
+
+
 # =============================================================================
 # 2. LOGIQUE TEMPORELLE (5h-22h)
 # =============================================================================
@@ -522,11 +571,12 @@ def main():
         
         for run in range(nb_runs):
             # La graine change à chaque run, mais reste reproductible 
-            seed_val = 40 + (n * 100) + run
+            seed_val = 42 + (n * 100) + run
             random.seed(seed_val)
             np.random.seed(seed_val)
             
             mat, e, l, s, P = genere_instance_complexe(n, precedence_prob=0.3)
+            #mat, e, l, s, P = genere_instance_pure_aleatoire(n, num_precedences=n//2)
             P_array = np.array(P) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
             
             # --- 1. Borne ---
