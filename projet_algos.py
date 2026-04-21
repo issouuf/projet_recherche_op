@@ -157,30 +157,22 @@ def formater_temps(total_mins):
 # =============================================================================
 # 3. FONCTION DE COÛT (ÉVALUATION AVEC PÉNALITÉS STRICTES)
 # =============================================================================
-
 @njit(cache=True)
 def evalue_tournee_complexe(path, mat, e, l, s, P_array):
     temps_cumule = 300.0 # Départ à 5h00
     penalite = 0.0
-    M = 50000.0 # On garde le gros M UNIQUEMENT pour les précédences !
+    M = 50000.0 
     
     for i in range(len(path) - 1):
         v = path[i+1]
         temps_cumule += mat[path[i], v]
         
-        # Gestion Nuit (22h -> 5h)
         heure_locale = temps_cumule % 1440
-        if heure_locale > 1320: 
-            jours = temps_cumule // 1440
-            temps_cumule = (jours + 1) * 1440 + 300 
-            heure_locale = 300
             
-        # Gestion Fenêtre Périodique
+        # Gestion Fenêtre Périodique (Le camion peut rouler de nuit, mais attend l'ouverture)
         if heure_locale < e[v]:
-            # On est en avance, on attend l'ouverture aujourd'hui
             temps_cumule += (e[v] - heure_locale) 
         elif heure_locale > l[v]:
-            # On est en retard, le magasin est fermé ! On attend l'ouverture DEMAIN.
             jours = temps_cumule // 1440
             temps_cumule = (jours + 1) * 1440 + e[v]
             
@@ -188,7 +180,6 @@ def evalue_tournee_complexe(path, mat, e, l, s, P_array):
         
     temps_cumule += mat[path[-1], path[0]] 
     
-    # Précédences (Restent strictes)
     pos = np.empty(len(path), dtype=np.int64)
     for idx in range(len(path)):
         pos[path[idx]] = idx
@@ -288,54 +279,41 @@ def borne_inferieure_TSP(mat):
 # --- L'HEURISTIQUE GLOUTONNE (Baseline) ---
 # ==========================================
 def heuristique_gloutonne(mat, e, l, P):
-    """
-    Construit un chemin ville par ville en choisissant le meilleur compromis 
-    (Trajet + Attente) tout en respectant les précédences.
-    """
     n = len(mat) - 1
     non_visites = set(range(1, n + 1))
     chemin = [0]
-    temps_actuel = 300.0 # Départ 5h00
+    temps_actuel = 300.0 
     
     while non_visites:
         meilleur_candidat = None
         meilleur_score = float('inf')
         
         for ville in non_visites:
-            # Dans la boucle for ville in non_visites:
             temps_trajet = mat[chemin[-1]][ville]
             arrivee = temps_actuel + temps_trajet
             
             heure_locale = arrivee % 1440
-            if heure_locale > 1320:
-                jours = arrivee // 1440
-                arrivee = (jours + 1) * 1440 + 300
-                heure_locale = 300
                 
             if heure_locale < e[ville]:
                 arrivee += (e[ville] - heure_locale)
             elif heure_locale > l[ville]:
                 jours = arrivee // 1440
-                arrivee = (jours + 1) * 1440 + e[ville] # Reporté au lendemain !
+                arrivee = (jours + 1) * 1440 + e[ville] 
                 
-            # Le score naturel est simplement le temps d'arrivée
             score = arrivee 
             
             if score < meilleur_score:
                 meilleur_score = score
                 meilleur_candidat = ville
                 
-        # Si aucun candidat valide (sécurité), on prend une ville au hasard
         if meilleur_candidat is None:
             meilleur_candidat = list(non_visites)[0]
             
         chemin.append(meilleur_candidat)
         non_visites.remove(meilleur_candidat)
         
-        # Mise à jour approximative du temps pour la prochaine itération
-        temps_actuel += mat[chemin[-2]][meilleur_candidat]
-        if temps_actuel < e[meilleur_candidat]:
-            temps_actuel = e[meilleur_candidat]
+        # CORRECTION ICI : L'horloge se met à jour correctement !
+        temps_actuel = meilleur_score + [meilleur_candidat]
             
     return np.array(chemin, dtype=np.int64)
 
