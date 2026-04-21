@@ -84,39 +84,36 @@ def formater_temps(total_mins):
 
 
 def genere_instance_pure_aleatoire(n, num_precedences=2):
-    # 1. Coordonnées aléatoires (0 à 100)
+    # 1. Coordonnées & Distances Euclidiennes
     coords = {i: (random.randint(0, 100), random.randint(0, 100)) for i in range(n + 1)}
-    
-    # 2. Matrice des distances Euclidiennes
     mat_temps = np.zeros((n+1, n+1), dtype=np.float64)
     for i in range(n+1):
         for j in range(n+1):
-            if i != j:
-                mat_temps[i][j] = math.hypot(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
+            if i != j: mat_temps[i][j] = math.hypot(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
                 
-    # 3. Floyd-Warshall (L'inégalité triangulaire indispensable pour les détours)
+    # 2. Floyd-Warshall (Inégalité triangulaire)
     for k in range(n+1):
         for i in range(n+1):
             for j in range(n+1):
                 if mat_temps[i][k] + mat_temps[k][j] < mat_temps[i][j]:
                     mat_temps[i][j] = mat_temps[i][k] + mat_temps[k][j]
-                    
     mat_temps = mat_temps.astype(np.int64)
 
-    # 4. Temps de service et Fenêtres (100% Aléatoires)
+    # 3. Temps de service
     s = np.random.randint(5, 15, size=n+1)
     s[0] = 0
+    
+    # 4. Fenêtres Périodiques (Heures d'ouverture CHAQUE JOUR)
     e = np.zeros(n+1)
-    l = np.full(n+1, 999999.0)
+    l = np.full(n+1, 1320.0) # Par défaut, ferme à 22h
     
     for i in range(1, n+1):
-        # On tire des fenêtres étalées sur les 2 premiers jours pour éviter que TOUT soit impossible
-        jour = random.randint(0, 1) 
-        heure_ouverture = random.randint(300, 1000) # Entre 5h et 16h40
-        e[i] = jour * 1440 + heure_ouverture
-        l[i] = e[i] + random.randint(60, 300) # Fenêtre de 1h à 5h de largeur
+        # Ouverture entre 5h (300) et 16h40 (1000)
+        e[i] = random.randint(300, 1000) 
+        # Reste ouvert entre 1h et 5h (sans dépasser 22h)
+        l[i] = min(1320, e[i] + random.randint(60, 300)) 
 
-    # 5. Précédences (100% Aléatoires)
+    # 5. Précédences Aléatoires
     P = []
     villes_dispo = list(range(1, n + 1))
     random.shuffle(villes_dispo)
@@ -126,7 +123,6 @@ def genere_instance_pure_aleatoire(n, num_precedences=2):
         P.append((i, j))
 
     return mat_temps, e, l, s, P
-
 
 # =============================================================================
 # 2. LOGIQUE TEMPORELLE (5h-22h)
@@ -166,37 +162,39 @@ def formater_temps(total_mins):
 def evalue_tournee_complexe(path, mat, e, l, s, P_array):
     temps_cumule = 300.0 # Départ à 5h00
     penalite = 0.0
-    M = 1000.0 
+    M = 50000.0 # On garde le gros M UNIQUEMENT pour les précédences !
     
-    # --- 1. Calcul du Temps et Fenêtres (O(N)) ---
     for i in range(len(path) - 1):
         v = path[i+1]
         temps_cumule += mat[path[i], v]
         
+        # Gestion Nuit (22h -> 5h)
         heure_locale = temps_cumule % 1440
-        if heure_locale > 1320: # Gestion de la nuit (> 22h)
-            jours_ecoules = temps_cumule // 1440
-            temps_cumule = (jours_ecoules + 1) * 1440 + 300 
+        if heure_locale > 1320: 
+            jours = temps_cumule // 1440
+            temps_cumule = (jours + 1) * 1440 + 300 
+            heure_locale = 300
             
-        if temps_cumule < e[v]:
-            temps_cumule = e[v] # Attente
-        elif temps_cumule > l[v]:
-            penalite += (temps_cumule - l[v]) * M # Retard
+        # Gestion Fenêtre Périodique
+        if heure_locale < e[v]:
+            # On est en avance, on attend l'ouverture aujourd'hui
+            temps_cumule += (e[v] - heure_locale) 
+        elif heure_locale > l[v]:
+            # On est en retard, le magasin est fermé ! On attend l'ouverture DEMAIN.
+            jours = temps_cumule // 1440
+            temps_cumule = (jours + 1) * 1440 + e[v]
             
         temps_cumule += s[v]
         
-    temps_cumule += mat[path[-1], path[0]] # Retour au dépôt
+    temps_cumule += mat[path[-1], path[0]] 
     
-    # --- 2. Vérification des Précédences (Ultra-Optimisé O(N)) ---
-    # Au lieu de chercher dans tout le tableau à chaque fois, on stocke la position
-    # de chaque ville une seule fois ! (C'est ce qui ralentissait tout avant)
+    # Précédences (Restent strictes)
     pos = np.empty(len(path), dtype=np.int64)
     for idx in range(len(path)):
         pos[path[idx]] = idx
-        
     for k in range(len(P_array)):
         if pos[P_array[k, 0]] > pos[P_array[k, 1]]:
-            penalite += M * 50
+            penalite += M
             
     return temps_cumule + penalite
 
@@ -204,39 +202,73 @@ def evalue_tournee_complexe(path, mat, e, l, s, P_array):
 # 4. MÉTHODES DE RÉSOLUTION
 # =============================================================================
 
-def resolution_PuLP_Exact(mat, e, l, s, P, timeout=120):
+def resolution_PuLP_Exact(mat, e, l, s, P, timeout=180):
     n = len(mat) - 1
-    prob = LpProblem("TSPTW_PC", LpMinimize)
+    prob = LpProblem("TSPTW_Periodic", LpMinimize)
     
     x = LpVariable.dicts("x", (range(n+1), range(n+1)), cat=LpBinary)
-    T = LpVariable.dicts("T", range(n+1), lowBound=0, cat=LpContinuous)
+    T = LpVariable.dicts("T", range(n+1), lowBound=0, cat=LpContinuous) # Temps absolu
+    u = LpVariable.dicts("u", range(1, n+1), lowBound=1, upBound=n, cat=LpContinuous)
     
-    prob += lpSum(mat[i][j] * x[i][j] for i in range(n+1) for j in range(n+1) if i != j)
+    # NOUVEAU : Variable Entière pour le Jour de visite !
+    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=n, cat=LpInteger) 
+    
+    Cmax = LpVariable("Cmax", lowBound=0, cat=LpContinuous)
+    prob += Cmax
     
     for i in range(n+1):
         prob += lpSum(x[i][j] for j in range(n+1) if i != j) == 1
         prob += lpSum(x[j][i] for j in range(n+1) if i != j) == 1
 
-    M = 10000
+    for i in range(1, n+1):
+        for j in range(1, n+1):
+            if i != j:
+                prob += u[i] - u[j] + n * x[i][j] <= n - 1
+
+    M = 100000
+    prob += T[0] == 300
+    prob += D[0] == 0 # Le dépôt part au jour 0
+    
     for i in range(n+1):
-        prob += T[i] >= e[i]
-        prob += T[i] <= l[i]
+        # L'heure absolue doit tomber dans la bonne fenêtre du JOUR choisi
+        prob += T[i] >= (D[i] * 1440) + e[i]
+        prob += T[i] <= (D[i] * 1440) + l[i]
+        
         for j in range(1, n+1):
             if i != j:
                 prob += T[i] + s[i] + mat[i][j] - M*(1 - x[i][j]) <= T[j]
 
-    for (i, j) in P:
-        prob += T[i] + s[i] + mat[i][j] <= T[j]
+    for i in range(1, n+1):
+        prob += Cmax >= T[i] + s[i] + mat[i][0] - M * (1 - x[i][0])
 
-    # Contrainte globale 22h max
-    # for i in range(n+1):
-    #     prob += T[i] <= 1320
+    for (i, j) in P:
+        prob += T[i] + s[i] <= T[j]
 
     prob.solve(PULP_CBC_CMD(msg=0, timeLimit=timeout))
     
-    if prob.status == 1: # Solution Optimale trouvée
-        return value(prob.objective)
-    else: # Infeasible ou Timeout
+    # ... (Garde exactement ton ancien code "if prob.status == 1: ..." ici) ...
+    if prob.status == 1:
+        succ = np.full(n+1, -1, dtype=np.int64)
+        for i in range(n+1):
+            for j in range(n+1):
+                if i != j and value(x[i][j]) > 0.5:
+                    succ[i] = j
+                    break
+        if np.any(succ == -1): return np.nan
+        path = [0]
+        current = 0
+        visites = set([0])
+        for _ in range(n):
+            nxt = int(succ[current])
+            if nxt in visites: return np.nan
+            path.append(nxt)
+            visites.add(nxt)
+            current = nxt
+        if len(path) != n + 1: return np.nan
+        path_np = np.array(path, dtype=np.int64)
+        P_array = np.array(P, dtype=np.int64) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
+        return evalue_tournee_complexe(path_np, mat, e, l, s, P_array)
+    else:
         return np.nan
 
 def borne_inferieure_TSP(mat):
@@ -270,33 +302,25 @@ def heuristique_gloutonne(mat, e, l, P):
         meilleur_score = float('inf')
         
         for ville in non_visites:
-            # 1. Vérifier si on a le droit d'y aller (Précédences)
-            precedence_ok = True
-            for (avant, apres) in P:
-                if apres == ville and avant in non_visites:
-                    precedence_ok = False # La ville 'avant' n'a pas encore été visitée !
-                    break
-            
-            if not precedence_ok:
-                continue # On passe à la ville suivante
-                
-            # 2. Simuler le trajet
+            # Dans la boucle for ville in non_visites:
             temps_trajet = mat[chemin[-1]][ville]
             arrivee = temps_actuel + temps_trajet
             
-            # Gestion de la nuit (si on dépasse 22h)
-            if (arrivee % 1440) > 1320:
+            heure_locale = arrivee % 1440
+            if heure_locale > 1320:
                 jours = arrivee // 1440
                 arrivee = (jours + 1) * 1440 + 300
+                heure_locale = 300
                 
-            # 3. Calcul du "Score" (On veut le score le plus bas)
-            score = temps_trajet
-            if arrivee < e[ville]:
-                score += (e[ville] - arrivee) # On ajoute le temps perdu à attendre
-            elif arrivee > l[ville]:
-                score += (arrivee - l[ville]) * 100 # Grosse pénalité si on est en retard
+            if heure_locale < e[ville]:
+                arrivee += (e[ville] - heure_locale)
+            elif heure_locale > l[ville]:
+                jours = arrivee // 1440
+                arrivee = (jours + 1) * 1440 + e[ville] # Reporté au lendemain !
                 
-            # 4. Garder le meilleur
+            # Le score naturel est simplement le temps d'arrivée
+            score = arrivee 
+            
             if score < meilleur_score:
                 meilleur_score = score
                 meilleur_candidat = ville
@@ -551,7 +575,7 @@ def main():
     temps_debut_global = time.time()
     
     sizes = range(5, 21, 5) 
-    nb_runs = 5 
+    nb_runs = 1 
     
     # Adieu la Borne Inférieure !
     results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
@@ -581,8 +605,7 @@ def main():
             if n <= 40: 
                 res_exact = resolution_PuLP_Exact(mat, e, l, s, P, timeout=timeout_val) 
                 if not np.isnan(res_exact):
-                    temps_pulp_total = res_exact + 300 + sum(s)
-                    runs_data["Exact_Plot"].append(temps_pulp_total) 
+                    runs_data["Exact_Plot"].append(res_exact) 
                 else:
                     runs_data["Exact_Plot"].append(np.nan)
             else:
@@ -595,7 +618,7 @@ def main():
 
             # --- 3. Recuit Simulé ---
             dynamic_temp = float(n * 2000) 
-            dynamic_alpha = float(1.0 - (0.10 / n)) 
+            dynamic_alpha = float(1.0 - (0.1 / n)) 
             dynamic_plateau = int(n * 500) 
             
             res_sa = recuit_simule_adaptatif_numba(chemin_glouton, mat, e, l, s, P_array, 
