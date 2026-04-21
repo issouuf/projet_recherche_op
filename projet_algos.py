@@ -83,42 +83,40 @@ def formater_temps(total_mins):
     return f"{heures}h{mins:02d}"
 
 
-
 def genere_instance_pure_aleatoire(n, num_precedences=2):
-    # 1. Génération des coordonnées (0 à 100)
-    coords = [(random.randint(0, 100), random.randint(0, 100)) for _ in range(n+1)]
+    # 1. Coordonnées aléatoires (0 à 100)
+    coords = {i: (random.randint(0, 100), random.randint(0, 100)) for i in range(n + 1)}
     
-    # 2. Calcul de la matrice des distances (Euclidienne)
+    # 2. Matrice des distances Euclidiennes
     mat_temps = np.zeros((n+1, n+1), dtype=np.float64)
     for i in range(n+1):
         for j in range(n+1):
             if i != j:
                 mat_temps[i][j] = math.hypot(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
                 
-    # On applique Floyd-Warshall pour garantir des routes logiques !
+    # 3. Floyd-Warshall (L'inégalité triangulaire indispensable pour les détours)
     for k in range(n+1):
         for i in range(n+1):
             for j in range(n+1):
                 if mat_temps[i][k] + mat_temps[k][j] < mat_temps[i][j]:
                     mat_temps[i][j] = mat_temps[i][k] + mat_temps[k][j]
-    
+                    
     mat_temps = mat_temps.astype(np.int64)
 
-    # 3. Temps de service
+    # 4. Temps de service et Fenêtres (100% Aléatoires)
     s = np.random.randint(5, 15, size=n+1)
     s[0] = 0
-
-    # 4. Fenêtres de temps 100% Aléatoires (Réparties sur 3 jours logiques)
     e = np.zeros(n+1)
     l = np.full(n+1, 999999.0)
+    
     for i in range(1, n+1):
-        jour = random.randint(0, 2) # L'ouverture peut tomber le Jour 0, 1 ou 2
+        # On tire des fenêtres étalées sur les 2 premiers jours pour éviter que TOUT soit impossible
+        jour = random.randint(0, 1) 
         heure_ouverture = random.randint(300, 1000) # Entre 5h et 16h40
-        
         e[i] = jour * 1440 + heure_ouverture
-        l[i] = e[i] + random.randint(60, 300) # La fenêtre reste ouverte entre 1h et 5h
+        l[i] = e[i] + random.randint(60, 300) # Fenêtre de 1h à 5h de largeur
 
-    # 5. Précédences Aléatoires (comme ton code)
+    # 5. Précédences (100% Aléatoires)
     P = []
     villes_dispo = list(range(1, n + 1))
     random.shuffle(villes_dispo)
@@ -552,43 +550,36 @@ def main():
     
     temps_debut_global = time.time()
     
-    sizes = range(5, 31, 5) #41
-    nb_runs = 3 # Le nombre d'instances différentes à tester par taille de ville !
+    sizes = range(5, 21, 5) 
+    nb_runs = 5 
     
-    # Nos listes stockeront désormais les MOYENNES
-    results = {"Borne": [], "Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
+    # Adieu la Borne Inférieure !
+    results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
     
     progress = IntProgress(min=0, max=len(sizes) * nb_runs, description='Calculs:', layout={"width" : "100%"})
     display(progress)
     
     for n in sizes:
         print(f"\n" + "="*60)
-        print(f"--- MOYENNE SUR {nb_runs} GRAPHES POUR {n} SOMMETS ---")
+        print(f"--- MOYENNE SUR {nb_runs} GRAPHES ALÉATOIRES POUR {n} SOMMETS ---")
         print("="*60)
         
-        # Dictionnaire temporaire pour stocker les 5 essais de cette taille
-        runs_data = {"Borne": [], "Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
+        runs_data = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
         
         for run in range(nb_runs):
-            # La graine change à chaque run, mais reste reproductible 
             seed_val = 42 + (n * 100) + run
             random.seed(seed_val)
             np.random.seed(seed_val)
             
-            mat, e, l, s, P = genere_instance_complexe(n, precedence_prob=0.3)
-            #mat, e, l, s, P = genere_instance_pure_aleatoire(n, num_precedences=n//2)
+            # --- LE NOUVEAU GÉNÉRATEUR PUR ALÉATOIRE ---
+            # On met environ n//3 précédences pour pimenter sans tout bloquer
+            mat, e, l, s, P = genere_instance_pure_aleatoire(n, num_precedences=max(1, n//3))
             P_array = np.array(P) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
             
-            # --- 1. Borne ---
-            res_borne = borne_inferieure_TSP(mat)
-            runs_data["Borne"].append(res_borne)
-            
-            # --- 2. PuLP Exact ---
+            # --- 1. PuLP Exact ---
             timeout_val = 180 
             if n <= 40: 
-                t0_pulp = time.time()
                 res_exact = resolution_PuLP_Exact(mat, e, l, s, P, timeout=timeout_val) 
-                t_pulp_cpu = time.time() - t0_pulp
                 if not np.isnan(res_exact):
                     temps_pulp_total = res_exact + 300 + sum(s)
                     runs_data["Exact_Plot"].append(temps_pulp_total) 
@@ -597,32 +588,26 @@ def main():
             else:
                 runs_data["Exact_Plot"].append(np.nan)
                 
-            # --- 3. Heuristique Gloutonne ---
-            t0_glouton = time.time()  
+            # --- 2. Heuristique Gloutonne ---
             chemin_glouton = heuristique_gloutonne(mat, e, l, P)
             res_glouton = evalue_tournee_complexe(chemin_glouton, mat, e, l, s, P_array)
-            t_glouton_cpu = time.time() - t0_glouton
             runs_data["Glouton"].append(res_glouton)
 
-            # --- 4. Recuit Simulé ---
-            dynamic_temp = float(n * 1000) 
-            dynamic_alpha = float(1.0 - (0.1 / n)) #vitesse de refroiddisement 
-            dynamic_plateau = int(n * 300) # 150 #tests par température 
+            # --- 3. Recuit Simulé ---
+            dynamic_temp = float(n * 2000) 
+            dynamic_alpha = float(1.0 - (0.10 / n)) 
+            dynamic_plateau = int(n * 500) 
             
-            t0_sa = time.time()
             res_sa = recuit_simule_adaptatif_numba(chemin_glouton, mat, e, l, s, P_array, 
                                                    t_init=dynamic_temp, 
                                                    alpha=dynamic_alpha, 
                                                    iter_plateau=dynamic_plateau)
-            t_sa_cpu = time.time() - t0_sa
             runs_data["SA"].append(res_sa)
             
-            
-            # --- 5. Recherche Tabou ---
-            # Paramètres dynamiques : plus il y a de villes, plus on fouille !
-            dyn_iter = n * 250              # Nombre d'itérations
-            dyn_voisins = n * 40            # Voisins explorés à CHAQUE itération
-            dyn_tenure = max(5, int(n * 0.4)) # Durée de l'interdiction tabou
+            # --- 4. Recherche Tabou ---
+            dyn_iter = n * 250              
+            dyn_voisins = n * 40            
+            dyn_tenure = max(5, int(n * 0.4)) 
             
             res_tabou = recherche_tabou_numba(chemin_glouton, mat, e, l, s, P_array,
                                               max_iter=dyn_iter,
@@ -630,11 +615,10 @@ def main():
                                               nb_voisins=dyn_voisins)
             runs_data["Tabou"].append(res_tabou)
             
-            # --- 6. Algorithme Génétique ---
-            # Paramètres adaptatifs
-            dyn_pop = 50 + (n * 2) # Plus il y a de villes, plus on a besoin de population
-            dyn_gen = n * 50       # Nombre de générations
-            dyn_mut = 0.15         # Taux de mutation
+            # --- 5. Algorithme Génétique ---
+            dyn_pop = 50 + (n * 2) 
+            dyn_gen = n * 50       
+            dyn_mut = 0.15         
             
             res_ga = algorithme_genetique_numba(chemin_glouton, mat, e, l, s, P_array,
                                                 pop_size=dyn_pop,
@@ -645,14 +629,8 @@ def main():
             progress.value += 1
             
         # =========================================================
-        # CALCUL DES MOYENNES POUR LA TAILLE 'n'
-        # np.nanmean calcule la moyenne en ignorant les np.nan (les Timeouts)
+        # CALCUL DES MOYENNES
         # =========================================================
-        
-        avg_borne = np.nanmean(runs_data["Borne"])
-        results["Borne"].append(avg_borne)
-        
-        # S'il n'y a QUE des NaN (ex: 5 timeouts de suite), nanmean lève un warning, on le gère :
         if np.isnan(runs_data["Exact_Plot"]).all():
             avg_pulp = np.nan
         else:
@@ -671,23 +649,20 @@ def main():
         avg_ga = np.nanmean(runs_data["GA"])
         results["GA"].append(avg_ga)
         
-        
-        # --- Affichage des Moyennes dans la console ---
+        # --- Affichage des Moyennes ---
         print(f"MOYENNES POUR {n} VILLES :")
-        print(f"- Borne Idéale    : {formater_temps(avg_borne)}")
-        
         if not np.isnan(avg_pulp):
             print(f"- PuLP Exact      : {formater_temps(avg_pulp)}")
-            print(f"- Glouton         : {formater_temps(avg_glouton)} (+{((avg_glouton - avg_pulp)/avg_pulp)*100:.2f}%b)")
+            print(f"- Glouton         : {formater_temps(avg_glouton)} (+{((avg_glouton - avg_pulp)/avg_pulp)*100:.2f}%)")
             print(f"- Recuit Simulé   : {formater_temps(avg_sa)} (+{((avg_sa - avg_pulp)/avg_pulp)*100:.2f}%)")
             print(f"- Recherche Tabou : {formater_temps(avg_tabou)} (+{((avg_tabou - avg_pulp)/avg_pulp)*100:.2f}%)")
-            print(f"- Algo  Génétique : {formater_temps(avg_ga)} (+{((avg_ga - avg_pulp)/avg_pulp)*100:.2f}%)")
-            print(f"-> Amélioration Recuit vs Glouton : {((avg_glouton - avg_sa)/avg_glouton)*100:.2f}% de temps gagné !")
+            print(f"- Algorithme Génétique : {formater_temps(avg_ga)} (+{((avg_ga - avg_pulp)/avg_pulp)*100:.2f}%)")
         else:
-            print(f"- PuLP Exact      : [100% de Timeouts]")
+            print(f"- PuLP Exact      : [100% Impossible / Timeouts]")
             print(f"- Glouton         : {formater_temps(avg_glouton)}")
             print(f"- Recuit Simulé   : {formater_temps(avg_sa)}")
             print(f"- Recherche Tabou : {formater_temps(avg_tabou)}")
+            print(f"- Algorithme Génétique : {formater_temps(avg_ga)}")
             
         gc.collect()
 
@@ -703,14 +678,12 @@ def main():
     # =============================================================================
     plt.figure(figsize=(14, 8))
     
-    y_borne = results["Borne"]
     y_pulp = results["Exact_Plot"]
     y_glouton = results["Glouton"]
     y_sa = results["SA"]
     y_tabou = results["Tabou"]
     y_ga = results["GA"]
 
-    #plt.plot(sizes, y_borne, marker='^', linestyle=':', label="Borne Inférieure (Moyenne)", color='gray', alpha=0.7)
     plt.plot(sizes, y_pulp, marker='o', linestyle='-', label="Optimum Mathématique (Moyenne)", color='black', linewidth=2)
     plt.plot(sizes, y_sa, marker='D', linestyle='-', label="Recuit Simulé (Moyenne)", color='purple', linewidth=2)
     plt.plot(sizes, y_tabou, marker='X', linestyle='-', label="Recherche Tabou (Moyenne)", color='green', linewidth=2)
@@ -724,28 +697,27 @@ def main():
             plt.annotate(f"{int(y_pulp[i])}m", (sizes[i], y_pulp[i]), textcoords="offset points", xytext=(-15, 10), ha='center', color='black', fontsize=9)
         if len(y_sa) > i and not np.isnan(y_sa[i]):
             plt.annotate(f"{int(y_sa[i])}m", (sizes[i], y_sa[i]), textcoords="offset points", xytext=(15, -15), ha='center', color='purple', fontsize=10, fontweight='bold')
-        if len(y_glouton) > i and not np.isnan(y_glouton[i]):
-            plt.annotate(f"{int(y_glouton[i])}m", (sizes[i], y_glouton[i]), textcoords="offset points", xytext=(0, 15), ha='center', color='orange', fontsize=9)
         if len(y_tabou) > i and not np.isnan(y_tabou[i]):
             plt.annotate(f"{int(y_tabou[i])}m", (sizes[i], y_tabou[i]), textcoords="offset points", xytext=(0, -20), ha='center', color='green', fontsize=10, fontweight='bold')
         if len(y_ga) > i and not np.isnan(y_ga[i]):
             plt.annotate(f"{int(y_ga[i])}m", (sizes[i], y_ga[i]), textcoords="offset points", xytext=(0, 20), ha='center', color='red', fontsize=10, fontweight='bold')
             
-            
     plt.xlabel("Nombre de villes (n)", fontsize=12)
-    plt.ylabel("Durée totale moyenne de la tournée (Minutes)", fontsize=12)
+    plt.ylabel("Durée totale moyenne (Minutes)", fontsize=12)
     
-    # NOUVEAU LIMITATEUR D'AXE Y POUR LE GRAPHIQUE
+    # Puisqu'on génère au hasard, les pénalités peuvent exploser. On limite l'axe Y dynamiquement.
     valeurs_pulp_valides = [v for v in y_pulp if not np.isnan(v)]
     if valeurs_pulp_valides:
-        plafond = max(valeurs_pulp_valides) * 1.5 
-        plt.ylim(bottom=min(y_borne) * 0.9, top=plafond)
+        plafond = max(valeurs_pulp_valides) * 2.0 # On donne un peu plus de marge pour voir les algos
+        plt.ylim(bottom=0, top=plafond)
         
-    plt.title(f"Benchmark TSPTW-PC : Moyennes sur {nb_runs} instances indépendantes", fontsize=14)
+    plt.title(f"Benchmark TSPTW-PC Aléatoire Pur : Moyennes sur {nb_runs} instances", fontsize=14)
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.legend(loc="upper left")
     plt.margins(y=0.2)
     plt.show()
+    
+
 
 
     
