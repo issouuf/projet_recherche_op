@@ -195,92 +195,69 @@ def evalue_tournee_complexe(path, mat, e, l, s, P_array):
 # 4. MÉTHODES DE RÉSOLUTION
 # =============================================================================
 
-def resolution_PuLP_Exact(mat, e, l, s, P, upper_bound=None, timeout=25, warm_start_path=None):
+def resolution_PuLP_Exact(mat, e, l, s, P, max_jours=None, timeout=180):
+    nb_coeurs = 6
+    chemin_nouveau_cbc = r"C:\Users\ulysse\Documents\projet_recherche_op\cbc.exe"
     n = len(mat) - 1
     prob = LpProblem("TSPTW_Periodic", LpMinimize)
-
-    # Borne temporelle dynamique: évite les faux infaisables dus à une limite fixe de jours.
-    if upper_bound is not None and not np.isnan(upper_bound) and upper_bound > 0:
-        temps_max_absolu = int(math.ceil(upper_bound)) + 1440
-    else:
-        # Fallback volontairement large si aucun incumbent n'est fourni.
-        temps_max_absolu = int(300 + (n + 2) * 1440)
-
-    borne_sup_jours = max(2, int(math.ceil(temps_max_absolu / 1440.0)) + 1)
     
-    arcs = [(i, j) for i in range(n+1) for j in range(n+1) if i != j]
-    x = LpVariable.dicts("x", arcs, cat=LpBinary)
-    T = LpVariable.dicts("T", range(n+1), lowBound=0, upBound=temps_max_absolu, cat=LpContinuous) 
-    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=borne_sup_jours, cat=LpInteger) 
+    # 1. On définit la limite de jours (soit celle du Glouton, soit 'n' par défaut)
+    borne_sup_jours = max_jours if max_jours is not None else n
+    
+    x = LpVariable.dicts("x", (range(n+1), range(n+1)), cat=LpBinary)
+    T = LpVariable.dicts("T", range(n+1), lowBound=0, cat=LpContinuous) # Temps absolu
+    u = LpVariable.dicts("u", range(1, n+1), lowBound=1, upBound=n, cat=LpContinuous)
+    
+    # NOUVEAU : Variable Entière pour le Jour de visite !
+    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=borne_sup_jours, cat=LpInteger)
+    
     Cmax = LpVariable("Cmax", lowBound=0, cat=LpContinuous)
-    
-    # 1. COUPE OBJECTIVE (Le plafond du Glouton)
-    if upper_bound is not None:
-        prob += Cmax <= math.ceil(upper_bound) 
-        
-    
-    prob += Cmax 
+    prob += Cmax
     
     for i in range(n+1):
-        prob += lpSum(x[(i, j)] for j in range(n+1) if i != j) == 1
-        prob += lpSum(x[(j, i)] for j in range(n+1) if i != j) == 1
+        prob += lpSum(x[i][j] for j in range(n+1) if i != j) == 1
+        prob += lpSum(x[j][i] for j in range(n+1) if i != j) == 1
 
+    for i in range(1, n+1):
+        for j in range(1, n+1):
+            if i != j:
+                prob += u[i] - u[j] + n * x[i][j] <= n - 1
+
+    M = 100000
     prob += T[0] == 300
-    prob += D[0] == 0 
+    prob += D[0] == 0 # Le dépôt part au jour 0
     
     for i in range(n+1):
+        # L'heure absolue doit tomber dans la bonne fenêtre du JOUR choisi
         prob += T[i] >= (D[i] * 1440) + e[i]
         prob += T[i] <= (D[i] * 1440) + l[i]
         
         for j in range(1, n+1):
             if i != j:
-                M_ij = temps_max_absolu + s[i] + mat[i][j] - e[j]
-                prob += T[i] + s[i] + mat[i][j] <= T[j] + M_ij * (1 - x[(i, j)])
-                
-                # =========================================================
-                # 3. NOUVELLE COUPE DE SAUT TEMPOREL (Valid Inequality)
-                # Si partir de 'i' dès son ouverture nous fait arriver après 
-                # la fermeture de 'j', alors le Jour de 'j' fera forcément +1 !
-                # =========================================================
-                start_time_i = 300 if i == 0 else e[i] # Le dépôt part à 5h00 (300)
-                min_jump = 1 if (start_time_i + s[i] + mat[i][j] > l[j]) else 0
-                
-                prob += D[j] >= D[i] + min_jump - borne_sup_jours * (1 - x[(i, j)])
+                prob += T[i] + s[i] + mat[i][j] - M*(1 - x[i][j]) <= T[j]
 
     for i in range(1, n+1):
-        M_i0 = temps_max_absolu + s[i] + mat[i][0] - 300
-        prob += Cmax >= T[i] + s[i] + mat[i][0] - M_i0 * (1 - x[(i, 0)])
+        prob += Cmax >= T[i] + s[i] + mat[i][0] - M * (1 - x[i][0])
 
     for (i, j) in P:
-        # Précédence pure: i doit être servi avant j (pas besoin d'ajouter un trajet direct i->j)
         prob += T[i] + s[i] <= T[j]
-        prob += D[j] >= D[i]
-
-    if warm_start_path is not None and len(warm_start_path) == n + 1:
-        for idx in range(n):
-            a = int(warm_start_path[idx])
-            b = int(warm_start_path[idx + 1])
-            if a != b:
-                x[(a, b)].setInitialValue(1)
-        last = int(warm_start_path[-1])
-        x[(last, 0)].setInitialValue(1)
-
-    solveur = PULP_CBC_CMD(
-        msg=0,
-        timeLimit=timeout,
-        gapRel=0.01,
-        presolve=True,
-        cuts=True,
-        keepFiles=(warm_start_path is not None),
-        warmStart=(warm_start_path is not None),
+        
+    solveur_multithread = COIN_CMD(
+    path=chemin_nouveau_cbc, # On force PuLP à utiliser CE fichier
+    msg=0,                   # On active les messages (1) pour VOIR le solveur travailler !
+    timeLimit=timeout,
+    threads=nb_coeurs
     )
-    prob.solve(solveur)
+
+    #prob.solve(solveur_multithread)
+    prob.solve(PULP_CBC_CMD(msg=0, timeLimit=timeout))
     
-    if prob.status == 1 or (prob.status == 0 and value(Cmax) is not None):
+    # ... (Garde exactement ton ancien code "if prob.status == 1: ..." ici) ...
+    if prob.status == 1:
         succ = np.full(n+1, -1, dtype=np.int64)
         for i in range(n+1):
             for j in range(n+1):
-                if i != j and value(x[(i, j)]) is not None and value(x[(i, j)]) > 0.5:
+                if i != j and value(x[i][j]) > 0.5:
                     succ[i] = j
                     break
         if np.any(succ == -1): return np.nan
@@ -612,24 +589,15 @@ def executer_un_run(n, run_id):
     res_glouton = evalue_tournee_complexe(chemin_glouton, mat, e, l, s, P_array)
     t_glouton = time.time() - t0
     
-    # 2. PuLP EXACT (warm-starté avec le Glouton pour converger plus vite)
+    jours_glouton = int(res_glouton // 1440) + 1 
+    
+    # 2. PuLP EXACT
     t0 = time.time()
-    timeout_val = 120
+    timeout_val = 60
     res_exact = np.nan
     if n <= 40: 
-        # On passe directement le score (en minutes)
-        res_brut = resolution_PuLP_Exact(
-            mat,
-            e,
-            l,
-            s,
-            P,
-            upper_bound=res_glouton,
-            timeout=timeout_val,
-            warm_start_path=chemin_glouton,
-        )
-        if not np.isnan(res_brut): 
-            res_exact = res_brut
+        res_brut = resolution_PuLP_Exact(mat, e, l, s, P, max_jours=jours_glouton, timeout=timeout_val) 
+        if not np.isnan(res_brut): res_exact = res_brut
     t_exact = time.time() - t0
 
     # 3. RECUIT SIMULÉ
@@ -673,7 +641,7 @@ def main():
     temps_debut_global = time.time()
     
     sizes = range(5, 31, 5) 
-    nb_runs = 1 #5 
+    nb_runs = 10 #5 
     
     results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
     std_results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
