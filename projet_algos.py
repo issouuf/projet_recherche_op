@@ -8,6 +8,8 @@ from IPython.display import display
 from numba import njit
 import gc
 import time 
+import os 
+import concurrent.futures
 
 # =============================================================================
 # 1. GÉNÉRATION D'INSTANCE GARANTIE FAISABLE (TSPTW-PC)
@@ -193,16 +195,21 @@ def evalue_tournee_complexe(path, mat, e, l, s, P_array):
 # 4. MÉTHODES DE RÉSOLUTION
 # =============================================================================
 
-def resolution_PuLP_Exact(mat, e, l, s, P, timeout=180):
+def resolution_PuLP_Exact(mat, e, l, s, P, max_jours=None, timeout=180):
+    nb_coeurs = 6
+    chemin_nouveau_cbc = r"C:\Users\ulysse\Documents\projet_recherche_op\cbc.exe"
     n = len(mat) - 1
     prob = LpProblem("TSPTW_Periodic", LpMinimize)
+    
+    # 1. On définit la limite de jours (soit celle du Glouton, soit 'n' par défaut)
+    borne_sup_jours = max_jours if max_jours is not None else n
     
     x = LpVariable.dicts("x", (range(n+1), range(n+1)), cat=LpBinary)
     T = LpVariable.dicts("T", range(n+1), lowBound=0, cat=LpContinuous) # Temps absolu
     u = LpVariable.dicts("u", range(1, n+1), lowBound=1, upBound=n, cat=LpContinuous)
     
     # NOUVEAU : Variable Entière pour le Jour de visite !
-    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=n, cat=LpInteger) 
+    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=borne_sup_jours, cat=LpInteger)
     
     Cmax = LpVariable("Cmax", lowBound=0, cat=LpContinuous)
     prob += Cmax
@@ -234,7 +241,15 @@ def resolution_PuLP_Exact(mat, e, l, s, P, timeout=180):
 
     for (i, j) in P:
         prob += T[i] + s[i] <= T[j]
+        
+    solveur_multithread = COIN_CMD(
+    path=chemin_nouveau_cbc, # On force PuLP à utiliser CE fichier
+    msg=0,                   # On active les messages (1) pour VOIR le solveur travailler !
+    timeLimit=timeout,
+    threads=nb_coeurs
+    )
 
+    #prob.solve(solveur_multithread)
     prob.solve(PULP_CBC_CMD(msg=0, timeLimit=timeout))
     
     # ... (Garde exactement ton ancien code "if prob.status == 1: ..." ici) ...
@@ -565,11 +580,13 @@ def main():
     
     temps_debut_global = time.time()
     
-    sizes = range(5, 21, 5) 
-    nb_runs = 1 
+    sizes = range(5, 31, 5) 
+    nb_runs = 5 
     
     # Adieu la Borne Inférieure !
     results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
+    
+    std_results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
     
     progress = IntProgress(min=0, max=len(sizes) * nb_runs, description='Calculs:', layout={"width" : "100%"})
     display(progress)
@@ -591,10 +608,20 @@ def main():
             mat, e, l, s, P = genere_instance_pure_aleatoire(n, num_precedences=max(1, n//3))
             P_array = np.array(P) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
             
-            # --- 1. PuLP Exact ---
+            
+            # --- 1. Heuristique Gloutonne ---
+            chemin_glouton = heuristique_gloutonne(mat, e, l, P)
+            res_glouton = evalue_tournee_complexe(chemin_glouton, mat, e, l, s, P_array)
+            runs_data["Glouton"].append(res_glouton)
+            
+            # On calcule combien de jours le Glouton a mis
+            # (ex: 4000 minutes // 1440 = 2 jours complets)
+            jours_glouton = int(res_glouton // 1440) + 1
+            
+            # --- 2. PuLP Exact ---
             timeout_val = 180 
             if n <= 40: 
-                res_exact = resolution_PuLP_Exact(mat, e, l, s, P, timeout=timeout_val) 
+                res_exact = resolution_PuLP_Exact(mat, e, l, s, P, max_jours=jours_glouton, timeout=timeout_val)
                 if not np.isnan(res_exact):
                     runs_data["Exact_Plot"].append(res_exact) 
                 else:
@@ -602,11 +629,6 @@ def main():
             else:
                 runs_data["Exact_Plot"].append(np.nan)
                 
-            # --- 2. Heuristique Gloutonne ---
-            chemin_glouton = heuristique_gloutonne(mat, e, l, P)
-            res_glouton = evalue_tournee_complexe(chemin_glouton, mat, e, l, s, P_array)
-            runs_data["Glouton"].append(res_glouton)
-
             # --- 3. Recuit Simulé ---
             dynamic_temp = float(n * 2000) 
             dynamic_alpha = float(1.0 - (0.1 / n)) 
@@ -621,7 +643,7 @@ def main():
             # --- 4. Recherche Tabou ---
             dyn_iter = n * 250              
             dyn_voisins = n * 40            
-            dyn_tenure = max(5, int(n * 0.4)) 
+            dyn_tenure = max(5, int(n * 0.6)) 
             
             res_tabou = recherche_tabou_numba(chemin_glouton, mat, e, l, s, P_array,
                                               max_iter=dyn_iter,
@@ -631,8 +653,8 @@ def main():
             
             # --- 5. Algorithme Génétique ---
             dyn_pop = 50 + (n * 2) 
-            dyn_gen = n * 50       
-            dyn_mut = 0.15         
+            dyn_gen = n * 100       
+            dyn_mut = 0.25        
             
             res_ga = algorithme_genetique_numba(chemin_glouton, mat, e, l, s, P_array,
                                                 pop_size=dyn_pop,
@@ -662,6 +684,13 @@ def main():
         
         avg_ga = np.nanmean(runs_data["GA"])
         results["GA"].append(avg_ga)
+        
+        # Calcul des écarts-types
+        std_results["Exact_Plot"].append(np.nanstd(runs_data["Exact_Plot"]) if not np.isnan(runs_data["Exact_Plot"]).all() else np.nan)
+        std_results["Glouton"].append(np.nanstd(runs_data["Glouton"]))
+        std_results["SA"].append(np.nanstd(runs_data["SA"]))
+        std_results["Tabou"].append(np.nanstd(runs_data["Tabou"]))
+        std_results["GA"].append(np.nanstd(runs_data["GA"]))
         
         # --- Affichage des Moyennes ---
         print(f"MOYENNES POUR {n} VILLES :")
@@ -729,6 +758,35 @@ def main():
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.legend(loc="upper left")
     plt.margins(y=0.2)
+    plt.show()
+    
+    # =============================================================================
+    # --- DEUXIÈME GRAPHIQUE : ÉCARTS-TYPES ---
+    # =============================================================================
+    plt.figure(figsize=(14, 6))
+    
+    # On utilise des barres décalées pour que ce soit lisible
+    bar_width = 0.15
+    index = np.arange(len(sizes))
+    
+    # On convertit en liste pour le plot
+    std_glouton = std_results["Glouton"]
+    std_sa = std_results["SA"]
+    std_tabou = std_results["Tabou"]
+    std_ga = std_results["GA"]
+
+    plt.bar(index - 1.5*bar_width, std_glouton, bar_width, label="Glouton", color='orange', alpha=0.8)
+    plt.bar(index - 0.5*bar_width, std_sa, bar_width, label="Recuit Simulé", color='purple', alpha=0.8)
+    plt.bar(index + 0.5*bar_width, std_tabou, bar_width, label="Recherche Tabou", color='green', alpha=0.8)
+    plt.bar(index + 1.5*bar_width, std_ga, bar_width, label="Génétique", color='red', alpha=0.8)
+
+    plt.xlabel("Nombre de villes (n)", fontsize=12)
+    plt.ylabel("Écart-type (Minutes)", fontsize=12)
+    plt.title(f"Stabilité des Algorithmes (Écart-type sur {nb_runs} runs)", fontsize=14)
+    plt.xticks(index, sizes)
+    plt.grid(True, linestyle=':', alpha=0.6, axis='y')
+    plt.legend(loc="upper left")
+    
     plt.show()
     
 
