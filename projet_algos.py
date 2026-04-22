@@ -282,13 +282,24 @@ def heuristique_gloutonne(mat, e, l, P):
     n = len(mat) - 1
     non_visites = set(range(1, n + 1))
     chemin = [0]
-    temps_actuel = 300.0 
+    temps_actuel = 300.0 # Départ 5h00
     
     while non_visites:
         meilleur_candidat = None
         meilleur_score = float('inf')
         
         for ville in non_visites:
+            # 1. FILTRE DES PRÉCÉDENCES (On ne visite pas J si I n'est pas encore visité)
+            precedence_ok = True
+            for (i, j) in P:
+                if ville == j and i not in chemin:
+                    precedence_ok = False
+                    break
+            
+            if not precedence_ok:
+                continue # On ignore cette ville pour le moment
+                
+            # 2. CALCUL DU TEMPS ET DES FENÊTRES
             temps_trajet = mat[chemin[-1]][ville]
             arrivee = temps_actuel + temps_trajet
             
@@ -306,14 +317,16 @@ def heuristique_gloutonne(mat, e, l, P):
                 meilleur_score = score
                 meilleur_candidat = ville
                 
+        # 3. SÉCURITÉ ANTI-BLOCAGE
         if meilleur_candidat is None:
             meilleur_candidat = list(non_visites)[0]
+            meilleur_score = temps_actuel + mat[chemin[-1]][meilleur_candidat]
             
         chemin.append(meilleur_candidat)
         non_visites.remove(meilleur_candidat)
         
-        # CORRECTION ICI : L'horloge se met à jour correctement !
-        temps_actuel = meilleur_score + [meilleur_candidat]
+        # 4. MISE À JOUR DE L'HORLOGE (+10min de service moyen)
+        temps_actuel = meilleur_score + 10 
             
     return np.array(chemin, dtype=np.int64)
 
