@@ -10,6 +10,7 @@ import gc
 import time 
 import os 
 import concurrent.futures
+import uuid
 
 # =============================================================================
 # 1. GÉNÉRATION D'INSTANCE GARANTIE FAISABLE (TSPTW-PC)
@@ -195,69 +196,105 @@ def evalue_tournee_complexe(path, mat, e, l, s, P_array):
 # 4. MÉTHODES DE RÉSOLUTION
 # =============================================================================
 
-def resolution_PuLP_Exact(mat, e, l, s, P, max_jours=None, timeout=180):
-    nb_coeurs = 6
-    chemin_nouveau_cbc = r"C:\Users\ulysse\Documents\projet_recherche_op\cbc.exe"
+def resolution_PuLP_Exact(mat, e, l, s, P, upper_bound=None, chemin_glouton=None, timeout=180):
     n = len(mat) - 1
-    prob = LpProblem("TSPTW_Periodic", LpMinimize)
     
-    # 1. On définit la limite de jours (soit celle du Glouton, soit 'n' par défaut)
-    borne_sup_jours = max_jours if max_jours is not None else n
+    nom_unique = f"TSPTW_{uuid.uuid4().hex}"
+    prob = LpProblem(nom_unique, LpMinimize)
+    
+    if upper_bound is not None:
+        temps_max_absolu = math.ceil(upper_bound)
+    else:
+        temps_max_absolu = (n + 1) * 1440
+        
+    borne_sup_jours = int(temps_max_absolu // 1440)
     
     x = LpVariable.dicts("x", (range(n+1), range(n+1)), cat=LpBinary)
-    T = LpVariable.dicts("T", range(n+1), lowBound=0, cat=LpContinuous) # Temps absolu
-    u = LpVariable.dicts("u", range(1, n+1), lowBound=1, upBound=n, cat=LpContinuous)
+    T = LpVariable.dicts("T", range(n+1), lowBound=0, upBound=temps_max_absolu, cat=LpContinuous) 
+    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=borne_sup_jours, cat=LpInteger) 
+    Cmax = LpVariable("Cmax", lowBound=0, upBound=temps_max_absolu, cat=LpContinuous)
     
-    # NOUVEAU : Variable Entière pour le Jour de visite !
-    D = LpVariable.dicts("D", range(n+1), lowBound=0, upBound=borne_sup_jours, cat=LpInteger)
+    # =========================================================
+    # LE WARM-START : Injection de la solution Gloutonne
+    # =========================================================
+    if chemin_glouton is not None:
+        # On initialise d'abord tout à 0 pour être propre
+        for i in range(n+1):
+            D[i].setInitialValue(0)
+            for j in range(n+1):
+                x[i][j].setInitialValue(0)
+                
+        t_cumul = 300.0
+        T[0].setInitialValue(300.0)
+        
+        # On simule le trajet du glouton pas à pas pour remplir les variables
+        for k in range(len(chemin_glouton) - 1):
+            u = chemin_glouton[k]
+            v = chemin_glouton[k+1]
+            x[u][v].setInitialValue(1) # Le camion passe par cette route
+            
+            t_cumul += mat[u][v]
+            hl = t_cumul % 1440
+            if hl < e[v]:
+                t_cumul += (e[v] - hl)
+            elif hl > l[v]:
+                jours = t_cumul // 1440
+                t_cumul = (jours + 1) * 1440 + e[v]
+            
+            D[v].setInitialValue(int(t_cumul // 1440)) # On donne le Jour exact
+            T[v].setInitialValue(t_cumul)              # On donne l'Heure exacte
+            
+            t_cumul += s[v]
+            
+        # Retour au dépôt
+        dernier = chemin_glouton[-1]
+        x[dernier][0].setInitialValue(1)
+        Cmax.setInitialValue(t_cumul + mat[dernier][0])
+
+    # Objectif
+    prob += Cmax 
     
-    Cmax = LpVariable("Cmax", lowBound=0, cat=LpContinuous)
-    prob += Cmax
-    
+    # Contraintes classiques et Coupes
     for i in range(n+1):
         prob += lpSum(x[i][j] for j in range(n+1) if i != j) == 1
         prob += lpSum(x[j][i] for j in range(n+1) if i != j) == 1
+        
+        for j in range(i+1, n+1):
+            prob += x[i][j] + x[j][i] <= 1 # Anti aller-retour immédiat
 
-    for i in range(1, n+1):
-        for j in range(1, n+1):
-            if i != j:
-                prob += u[i] - u[j] + n * x[i][j] <= n - 1
-
-    M = 100000
     prob += T[0] == 300
-    prob += D[0] == 0 # Le dépôt part au jour 0
+    prob += D[0] == 0 
     
     for i in range(n+1):
-        # L'heure absolue doit tomber dans la bonne fenêtre du JOUR choisi
         prob += T[i] >= (D[i] * 1440) + e[i]
         prob += T[i] <= (D[i] * 1440) + l[i]
         
         for j in range(1, n+1):
             if i != j:
-                prob += T[i] + s[i] + mat[i][j] - M*(1 - x[i][j]) <= T[j]
+                M_ij = temps_max_absolu + s[i] + mat[i][j] - e[j]
+                prob += T[i] + s[i] + mat[i][j] <= T[j] + M_ij * (1 - x[i][j])
+                prob += D[j] >= D[i] - (borne_sup_jours + 1) * (1 - x[i][j])
 
     for i in range(1, n+1):
-        prob += Cmax >= T[i] + s[i] + mat[i][0] - M * (1 - x[i][0])
+        M_i0 = temps_max_absolu + s[i] + mat[i][0] - 300
+        prob += Cmax >= T[i] + s[i] + mat[i][0] - M_i0 * (1 - x[i][0])
 
     for (i, j) in P:
-        prob += T[i] + s[i] <= T[j]
-        
-    solveur_multithread = COIN_CMD(
-    path=chemin_nouveau_cbc, # On force PuLP à utiliser CE fichier
-    msg=0,                   # On active les messages (1) pour VOIR le solveur travailler !
-    timeLimit=timeout,
-    threads=nb_coeurs
-    )
+        prob += T[i] + s[i] + mat[i][j] <= T[j]
+        prob += D[j] >= D[i]
 
-    #prob.solve(solveur_multithread)
-    prob.solve(PULP_CBC_CMD(msg=0, timeLimit=timeout))
+    # =========================================================
+    # Lancement du solveur avec warmStart=True
+    # =========================================================
+    solveur = PULP_CBC_CMD(msg=0, timeLimit=timeout, warmStart=True, keepFiles=True) 
+    prob.solve(solveur)
     
-    # ... (Garde exactement ton ancien code "if prob.status == 1: ..." ici) ...
-    if prob.status == 1:
+    # Extraction sécurisée (Sans se soucier du status si on a une solution !)
+    if value(Cmax) is not None:
         succ = np.full(n+1, -1, dtype=np.int64)
         for i in range(n+1):
             for j in range(n+1):
-                if i != j and value(x[i][j]) > 0.5:
+                if i != j and value(x[i][j]) is not None and value(x[i][j]) > 0.5:
                     succ[i] = j
                     break
         if np.any(succ == -1): return np.nan
@@ -591,15 +628,22 @@ def executer_un_run(n, run_id):
     
     jours_glouton = int(res_glouton // 1440) + 1 
     
-    # 2. PuLP EXACT
+    # 2. PuLP EXACT (Bridé et Warm-Starté par le Glouton)
     t0 = time.time()
-    timeout_val = 60
+    timeout_val = 60 
     res_exact = np.nan
     if n <= 40: 
-        res_brut = resolution_PuLP_Exact(mat, e, l, s, P, max_jours=jours_glouton, timeout=timeout_val) 
-        if not np.isnan(res_brut): res_exact = res_brut
+        # On passe le score ET le chemin du glouton à PuLP !
+        res_brut = resolution_PuLP_Exact(mat, e, l, s, P, upper_bound=res_glouton, chemin_glouton=chemin_glouton, timeout=timeout_val) 
+        
+        # Le filet de sécurité
+        if not np.isnan(res_brut): 
+            res_exact = res_brut
+        else:
+            res_exact = res_glouton # S'il plante, on garde le glouton
+            
     t_exact = time.time() - t0
-
+    
     # 3. RECUIT SIMULÉ
     t0 = time.time()
     dynamic_temp = float(n * 2000) 
@@ -716,13 +760,13 @@ def main():
         # --- Affichage des Moyennes avec les temps d'exécution ---
         print(f"MOYENNES POUR {n} VILLES :")
         if not np.isnan(avg_pulp):
-            print(f"- PuLP Exact      : {formater_temps(avg_pulp)} | Temps d'exec : {avg_t_pulp:.2f}s")
+            print(f"- Simplexe        : {formater_temps(avg_pulp)} | Temps d'exec : {avg_t_pulp:.2f}s")
             print(f"- Glouton         : {formater_temps(avg_glouton)} (+{((avg_glouton - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_glouton:.2f}s")
             print(f"- Recuit Simulé   : {formater_temps(avg_sa)} (+{((avg_sa - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_sa:.2f}s")
             print(f"- Recherche Tabou : {formater_temps(avg_tabou)} (+{((avg_tabou - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_tabou:.2f}s")
             print(f"- Algorithme Génétique : {formater_temps(avg_ga)} (+{((avg_ga - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_ga:.2f}s")
         else:
-            print(f"- PuLP Exact      : [100% Impossible / Timeouts]")
+            print(f"- Simplexe        : [100% Impossible / Timeouts]")
             print(f"- Glouton         : {formater_temps(avg_glouton)} | Temps d'exec : {avg_t_glouton:.2f}s")
             print(f"- Recuit Simulé   : {formater_temps(avg_sa)} | Temps d'exec : {avg_t_sa:.2f}s")
             print(f"- Recherche Tabou : {formater_temps(avg_tabou)} | Temps d'exec : {avg_t_tabou:.2f}s")
@@ -730,6 +774,12 @@ def main():
             
         gc.collect()
 
+    for fichier in os.listdir('.'):
+            if fichier.endswith('.mps') or fichier.endswith('.mst') or fichier.endswith('.sol'):
+                try:
+                    os.remove(fichier)
+                except:
+                    pass
     progress.close()
     
     temps_total_global = time.time() - temps_debut_global
@@ -862,8 +912,8 @@ def main():
     plt.grid(True, linestyle=':', alpha=0.6, axis='y')
     plt.show()
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
     
 import itertools
 
@@ -928,3 +978,102 @@ def auto_tune_recuit_simule(n_test=20, nb_runs_par_combo=3):
 
 # if __name__ == "__main__":
 #     auto_tune_recuit_simule(n_test=20)
+
+def analyse_sensibilite_globale(n_villes=15, nb_runs=5):
+    print("\n" + "="*70)
+    print(f"DEMARRAGE DE L'ANALYSE DE SENSIBILITE GLOBALE ({n_villes} VILLES, {nb_runs} RUNS)")
+    print("="*70)
+    
+    # 1. GENERATION DES INSTANCES FIGEES
+    instances = []
+    chemins_initiaux = []
+    
+    for run in range(nb_runs):
+        random.seed(1000 + run)
+        np.random.seed(1000 + run)
+        mat, e, l, s, P = genere_instance_pure_aleatoire(n_villes, num_precedences=max(1, n_villes//3))
+        P_array = np.array(P) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
+        
+        chemin_glouton = heuristique_gloutonne(mat, e, l, P)
+        instances.append((mat, e, l, s, P_array))
+        chemins_initiaux.append(chemin_glouton)
+        
+    def evaluer_parametre(algo_func, param_name, param_values, kwargs_base):
+        scores_mean, scores_std, times_mean = [], [], []
+        for val in param_values:
+            scores, times = [], []
+            for i in range(nb_runs):
+                mat, e, l, s, P_array = instances[i]
+                kwargs = kwargs_base.copy()
+                kwargs[param_name] = val
+                
+                t0 = time.time()
+                score = algo_func(chemins_initiaux[i], mat, e, l, s, P_array, **kwargs)
+                times.append(time.time() - t0)
+                scores.append(score)
+                
+            scores_mean.append(np.mean(scores))
+            scores_std.append(np.std(scores))
+            times_mean.append(np.mean(times))
+            
+            val_str = f"{val:.3f}" if isinstance(val, float) else f"{val:3d}"
+            print(f"  - {param_name} = {val_str} : Score = {int(scores_mean[-1])}m | Temps = {times_mean[-1]:.3f}s")
+        return scores_mean, scores_std, times_mean
+
+    # 2. CALCULS : RECUIT ET TABOU
+    print("\n[1/5] Analyse du Recuit Simule (Alpha)...")
+    alphas = [0.01,0.05,0.1,0.80, 0.90, 0.95, 0.98, 0.99, 0.995, 0.999]
+    sa_s_mean, sa_s_std, sa_t_mean = evaluer_parametre(recuit_simule_adaptatif_numba, 'alpha', alphas, {'t_init': n_villes*2000, 'iter_plateau': n_villes*100})
+
+    print("\n[2/5] Analyse de la Recherche Tabou (Tenure)...")
+    tenures = [1, 2, 5, 10, 15, 20, 30, 50, 100, 500, 1000]
+    tab_s_mean, tab_s_std, tab_t_mean = evaluer_parametre(recherche_tabou_numba, 'tabu_tenure', tenures, {'max_iter': n_villes*150, 'nb_voisins': n_villes*20})
+
+    # 3. CALCULS : GENETIQUE 
+    base_pop, base_gen, base_mut = 100, 500, 0.30
+    
+    print("\n[3/5] Genetique : Impact de la Population (TRES LARGE)...")
+    pops = [2, 10, 50, 100, 300, 600, 1000] 
+    gap_s_mean, gap_s_std, gap_t_mean = evaluer_parametre(algorithme_genetique_numba, 'pop_size', pops, {'generations': base_gen, 'mutation_rate': base_mut})
+
+    print("\n[4/5] Genetique : Impact de la Mutation (0% a 100%)...")
+    mutations = [0.0, 0.05, 0.15, 0.30, 0.60, 0.85, 1.0] # De l'immobilisme au chaos
+    gam_s_mean, gam_s_std, gam_t_mean = evaluer_parametre(algorithme_genetique_numba, 'mutation_rate', mutations, {'pop_size': base_pop, 'generations': base_gen})
+
+    print("\n[5/5] Genetique : Impact des Generations...")
+    gens = [10, 100, 500, 1000, 3000, 5000]
+    gag_s_mean, gag_s_std, gag_t_mean = evaluer_parametre(algorithme_genetique_numba, 'generations', gens, {'pop_size': base_pop, 'mutation_rate': base_mut})
+
+    # 4. TRACAGE
+    def tracer_separe(x_data, y_score, y_std, y_time, titre, xlabel):
+        plt.figure(figsize=(10, 6))
+        ax = plt.gca()
+        color_score, color_time = '#1f77b4', '#d62728'
+        
+        ax.set_title(titre, fontsize=13, fontweight='bold', pad=10)
+        ax.set_xlabel(xlabel, fontsize=11)
+        ax.set_ylabel("Qualite (Minutes)", color=color_score, fontweight='bold')
+        ax.plot(x_data, y_score, marker='o', color=color_score, lw=3, label="Score")
+        ax.fill_between(x_data, np.subtract(y_score, y_std), np.add(y_score, y_std), color=color_score, alpha=0.1)
+        ax.tick_params(axis='y', labelcolor=color_score)
+        ax.grid(True, ls='--', alpha=0.5)
+        
+        ax2 = ax.twinx()
+        ax2.set_ylabel("Temps CPU (Secondes)", color=color_time, fontweight='bold')
+        ax2.plot(x_data, y_time, marker='s', ls=':', color=color_time, lw=2, label="Temps")
+        ax2.tick_params(axis='y', labelcolor=color_time)
+        plt.tight_layout()
+        plt.show()
+
+    # Affichage en fenetres separees
+    tracer_separe(alphas, sa_s_mean, sa_s_std, sa_t_mean, "Recuit : Alpha", "Alpha")
+    tracer_separe(tenures, tab_s_mean, tab_s_std, tab_t_mean, "Tabou : Tenure", "Tenure")
+    tracer_separe(pops, gap_s_mean, gap_s_std, gap_t_mean, "Genetique : Population ", "Individus")
+    tracer_separe(mutations, gam_s_mean, gam_s_std, gam_t_mean, "Genetique : Mutation ", "Taux mutation")
+    tracer_separe(gens, gag_s_mean, gag_s_std, gag_t_mean, "Genetique : Generations (Loi du rendement decroissant)", "Generations")
+
+
+if __name__ == "__main__":
+    # commente main() et décommente l'analyse pour la lancer
+    main() 
+    #analyse_sensibilite_globale(n_villes=15, nb_runs=5)
