@@ -200,8 +200,13 @@ def resolution_PuLP_Exact(mat, e, l, s, P, upper_bound=None, timeout=25, warm_st
     prob = LpProblem("TSPTW_Periodic", LpMinimize)
 
     # Borne temporelle dynamique: évite les faux infaisables dus à une limite fixe de jours.
-    if upper_bound is not None and not np.isnan(upper_bound) and upper_bound > 0:
-        temps_max_absolu = int(math.ceil(upper_bound)) + 1440
+    if upper_bound is not None and np.isscalar(upper_bound):
+        upper_bound = float(upper_bound)
+        if not np.isnan(upper_bound) and upper_bound > 0:
+            temps_max_absolu = int(math.ceil(upper_bound)) + 1440
+        else:
+            # Fallback volontairement large si la borne est invalide.
+            temps_max_absolu = int(300 + (n + 2) * 1440)
     else:
         # Fallback volontairement large si aucun incumbent n'est fourni.
         temps_max_absolu = int(300 + (n + 2) * 1440)
@@ -271,34 +276,66 @@ def resolution_PuLP_Exact(mat, e, l, s, P, upper_bound=None, timeout=25, warm_st
         gapRel=0.01,
         presolve=True,
         cuts=True,
-        keepFiles=(warm_start_path is not None),
-        warmStart=(warm_start_path is not None),
+        keepFiles=False,
+        warmStart=False,
     )
-    prob.solve(solveur)
-    
-    if prob.status == 1 or (prob.status == 0 and value(Cmax) is not None):
-        succ = np.full(n+1, -1, dtype=np.int64)
-        for i in range(n+1):
-            for j in range(n+1):
-                if i != j and value(x[(i, j)]) is not None and value(x[(i, j)]) > 0.5:
-                    succ[i] = j
-                    break
-        if np.any(succ == -1): return np.nan
+    try:
+        prob.solve(solveur)
+    except Exception:
+        if warm_start_path is not None:
+            P_array = np.array(P, dtype=np.int64) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
+            return evalue_tournee_complexe(np.array(warm_start_path, dtype=np.int64), mat, e, l, s, P_array)
+        return np.nan
+
+    def _extraire_solution():
+        succ = np.full(n + 1, -1, dtype=np.int64)
+        for i in range(n + 1):
+            for j in range(n + 1):
+                if i != j:
+                    val_x = value(x[(i, j)])
+                    if val_x is not None and val_x > 0.5:
+                        succ[i] = j
+                        break
+        if np.any(succ == -1):
+            return None
+
         path = [0]
         current = 0
         visites = set([0])
         for _ in range(n):
             nxt = int(succ[current])
-            if nxt in visites: return np.nan
+            if nxt in visites:
+                return None
             path.append(nxt)
             visites.add(nxt)
             current = nxt
-        if len(path) != n + 1: return np.nan
+        if len(path) != n + 1:
+            return None
+
         path_np = np.array(path, dtype=np.int64)
         P_array = np.array(P, dtype=np.int64) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
         return evalue_tournee_complexe(path_np, mat, e, l, s, P_array)
-    else:
-        return np.nan
+
+    valeur = _extraire_solution()
+    if valeur is not None:
+        # Garde-fou de cohérence: si la tournée reconstruite est pire que la borne gloutonne,
+        # on la rejette (le modèle MIP peut être optimiste vs l'évaluateur périodique réel).
+        if upper_bound is not None and np.isscalar(upper_bound):
+            ub = float(upper_bound)
+            if not np.isnan(ub) and valeur > ub + 1e-9:
+                if warm_start_path is not None:
+                    P_array = np.array(P, dtype=np.int64) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
+                    return evalue_tournee_complexe(np.array(warm_start_path, dtype=np.int64), mat, e, l, s, P_array)
+                return ub
+        return valeur
+
+    # Si CBC a trouvé quelque chose mais que l'extraction échoue, on garde au moins le warm start.
+    if warm_start_path is not None:
+        P_array = np.array(P, dtype=np.int64) if len(P) > 0 else np.empty((0, 2), dtype=np.int64)
+        warm_start_score = evalue_tournee_complexe(np.array(warm_start_path, dtype=np.int64), mat, e, l, s, P_array)
+        return warm_start_score
+
+    return np.nan
 
 def borne_inferieure_TSP(mat):
     n = len(mat) - 1
@@ -596,6 +633,7 @@ def algorithme_genetique_numba(initial_path, mat, e, l, s, P_array, pop_size=100
 
 import time
 import concurrent.futures
+import traceback
 
 def executer_un_run(n, run_id):
     """Calcule 1 Graphe et chronomètre chaque méthode."""
@@ -618,18 +656,23 @@ def executer_un_run(n, run_id):
     res_exact = np.nan
     if n <= 40: 
         # On passe directement le score (en minutes)
-        res_brut = resolution_PuLP_Exact(
-            mat,
-            e,
-            l,
-            s,
-            P,
-            upper_bound=res_glouton,
-            timeout=timeout_val,
-            warm_start_path=chemin_glouton,
-        )
-        if not np.isnan(res_brut): 
-            res_exact = res_brut
+        try:
+            res_brut = resolution_PuLP_Exact(
+                mat,
+                e,
+                l,
+                s,
+                P,
+                upper_bound=res_glouton,
+                timeout=timeout_val,
+                warm_start_path=chemin_glouton,
+            )
+            if not np.isnan(res_brut):
+                res_exact = res_brut
+            else:
+                res_exact = res_glouton
+        except Exception:
+            res_exact = res_glouton
     t_exact = time.time() - t0
 
     # 3. RECUIT SIMULÉ
@@ -673,7 +716,7 @@ def main():
     temps_debut_global = time.time()
     
     sizes = range(5, 31, 5) 
-    nb_runs = 1 #5 
+    nb_runs = 5 #5 
     
     results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
     std_results = {"Exact_Plot": [], "Glouton": [], "SA": [], "Tabou": [], "GA": []}
@@ -712,6 +755,7 @@ def main():
                     progress.value += 1
                 except Exception as e:
                     print(f"Erreur sur un processus : {e}")
+                    print(traceback.format_exc())
             
         # =========================================================
         # CALCUL DES MOYENNES (SCORES ET TEMPS)
@@ -748,13 +792,13 @@ def main():
         # --- Affichage des Moyennes avec les temps d'exécution ---
         print(f"MOYENNES POUR {n} VILLES :")
         if not np.isnan(avg_pulp):
-            print(f"- PuLP Exact      : {formater_temps(avg_pulp)} | Temps d'exec : {avg_t_pulp:.2f}s")
+            print(f"- Simplexe        : {formater_temps(avg_pulp)} | Temps d'exec : {avg_t_pulp:.2f}s")
             print(f"- Glouton         : {formater_temps(avg_glouton)} (+{((avg_glouton - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_glouton:.2f}s")
             print(f"- Recuit Simulé   : {formater_temps(avg_sa)} (+{((avg_sa - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_sa:.2f}s")
             print(f"- Recherche Tabou : {formater_temps(avg_tabou)} (+{((avg_tabou - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_tabou:.2f}s")
             print(f"- Algorithme Génétique : {formater_temps(avg_ga)} (+{((avg_ga - avg_pulp)/avg_pulp)*100:.2f}%) | Temps d'exec : {avg_t_ga:.2f}s")
         else:
-            print(f"- PuLP Exact      : [100% Impossible / Timeouts]")
+            print(f"- Simplexe        : [100% Impossible / Timeouts]")
             print(f"- Glouton         : {formater_temps(avg_glouton)} | Temps d'exec : {avg_t_glouton:.2f}s")
             print(f"- Recuit Simulé   : {formater_temps(avg_sa)} | Temps d'exec : {avg_t_sa:.2f}s")
             print(f"- Recherche Tabou : {formater_temps(avg_tabou)} | Temps d'exec : {avg_t_tabou:.2f}s")
