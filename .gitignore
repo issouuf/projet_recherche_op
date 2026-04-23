@@ -1,2 +1,5 @@
 *.nbc
 *.nbi
+*.sol
+*.mps
+*.mst

@@ -25,7 +25,7 @@ def genere_instance_complexe(n, precedence_prob=0.1):
     # 2. LE CORRECTIF : Algorithme de Floyd-Warshall
     # Transforme le graphe aléatoire en vrai réseau routier.
     # Garantit que le trajet direct A->B n'est jamais plus lent 
-    # qu'un détour par C. (Modélise le transit sans service !)
+    # qu'un détour par C. 
     # =========================================================
     for k in range(n+1):
         for i in range(n+1):
@@ -79,7 +79,7 @@ def formater_temps(total_mins):
     if np.isnan(total_mins):
         return "[Non trouvé / Invalide]"
     if total_mins > 2000: # Si la pénalité a explosé le compteur
-        return f"🚨 [INVALIDE - Score pénalité : {int(total_mins)}]"
+        return f"[INVALIDE - Score pénalité : {int(total_mins)}]"
         
     heures = int(total_mins // 60)
     mins = int(total_mins % 60)
@@ -784,7 +784,7 @@ def main():
     
     temps_total_global = time.time() - temps_debut_global
     print(f"\n" + "*"*60)
-    print(f"⏳ TEMPS TOTAL D'EXÉCUTION DU BENCHMARK ({nb_runs} runs/taille) : {temps_total_global:.2f} secondes")
+    print(f"TEMPS TOTAL D'EXÉCUTION DU BENCHMARK ({nb_runs} runs/taille) : {temps_total_global:.2f} secondes")
     print("*"*60 + "\n")
 
     # =============================================================================
@@ -915,6 +915,7 @@ def main():
 # if __name__ == "__main__":
 #     main()
     
+
 import itertools
 
 def auto_tune_recuit_simule(n_test=20, nb_runs_par_combo=3):
@@ -978,6 +979,10 @@ def auto_tune_recuit_simule(n_test=20, nb_runs_par_combo=3):
 
 # if __name__ == "__main__":
 #     auto_tune_recuit_simule(n_test=20)
+
+# =============================================================================
+# 8. ANALYSE DE SENSIBILITÉ GLOBALE
+# =============================================================================
 
 def analyse_sensibilite_globale(n_villes=15, nb_runs=5):
     print("\n" + "="*70)
