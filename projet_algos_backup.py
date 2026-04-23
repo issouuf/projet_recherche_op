@@ -633,7 +633,7 @@ def executer_un_run(n, run_id):
     timeout_val = 60 
     res_exact = np.nan
     if n <= 40: 
-        # On passe le score ET le chemin du glouton à PuLP !
+        # On passe le score ET le chemin du glouton à PuLP
         res_brut = resolution_PuLP_Exact(mat, e, l, s, P, upper_bound=res_glouton, chemin_glouton=chemin_glouton, timeout=timeout_val) 
         
         # Le filet de sécurité
@@ -1079,6 +1079,5 @@ def analyse_sensibilite_globale(n_villes=15, nb_runs=5):
 
 
 if __name__ == "__main__":
-    # commente main() et décommente l'analyse pour la lancer
     main() 
     #analyse_sensibilite_globale(n_villes=15, nb_runs=5)
